@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# VM Orchestrator Script - Fixed Version
+# Collects IPs of newly created VMs and updates Ansible inventory
+
+PROXMOX_HOST="192.168.1.146"
+INVENTORY_FILE="inventory.ini"
+TEMP_INVENTORY="/tmp/inventory.tmp"
+
+# Initialize temporary inventory file
+echo "# Auto-generated inventory - $(date)" > "$TEMP_INVENTORY"
+echo "[all]" >> "$TEMP_INVENTORY"
+
+# Get list of all VMs
+vm_list=$(ssh root@"$PROXMOX_HOST" "qm list | awk '\$1 > 1000 && \$3 == \"running\" {print \$1}'")
+
+# Process each VM
+for vm_id in $vm_list; do
+    echo "Processing VM ID: $vm_id"
+    
+    # Get network interfaces info
+    network_info=$(ssh root@"$PROXMOX_HOST" "qm guest cmd $vm_id network-get-interfaces 2>/dev/null")
+    
+    # Extract IPv4 address - updated parsing method
+    vm_ip=$(echo "$network_info" | jq -r '.[].["ip-addresses"]? // empty | .[]? | select(.["ip-address-type"]? == "ipv4" and .["ip-address"]? != "127.0.0.1") | .["ip-address"]' | head -n 1)
+    
+    if [ -n "$vm_ip" ]; then
+        echo "Found IP: $vm_ip"
+        echo "$vm_ip ansible_user=sysadmin" >> "$TEMP_INVENTORY"
+    else
+        echo "No IPv4 address found for VM $vm_id (or guest agent not running)"
+        echo "Raw network info:"
+        echo "$network_info" | jq . 2>/dev/null || echo "$network_info"
+    fi
+done
+
+# Replace inventory file if we found any VMs
+if [ $(wc -l < "$TEMP_INVENTORY") -gt 2 ]; then
+    mv "$TEMP_INVENTORY" "$INVENTORY_FILE"
+    echo -e "\nUpdated inventory file:"
+    cat "$INVENTORY_FILE"
+else
+    echo "No qualifying VMs found with IP addresses"
+    rm "$TEMP_INVENTORY"
+fi

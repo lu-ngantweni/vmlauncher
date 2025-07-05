@@ -1,0 +1,122 @@
+---
+- name: Prepare Proxmox Template
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    # Task 1: Perform system update
+    - name: Update system packages (Ubuntu/Debian)
+      apt:
+        update_cache: yes
+        upgrade: dist
+      when: ansible_os_family == 'Debian'
+
+    - name: Update system packages (RHEL/CentOS)
+      yum:
+        name: '*'
+        state: latest
+      when: ansible_os_family == 'RedHat'
+
+    # Task 2: Configure passwordless sudo
+    - name: Configure passwordless sudo
+      block:
+        - name: Configure passwordless sudo for current user
+          lineinfile:
+            path: /etc/sudoers
+            line: "{{ ansible_user }} ALL=(ALL) NOPASSWD:ALL"
+            validate: 'visudo -cf %s'
+          
+        - name: Configure passwordless sudo for wheel group
+          lineinfile:
+            path: /etc/sudoers
+            line: "%wheel ALL=(ALL) NOPASSWD: ALL"
+            validate: 'visudo -cf %s'
+      tags: sudo
+
+    # Task 3: Install cloud-init
+    - name: Install cloud-init (Ubuntu/Debian)
+      apt:
+        name: cloud-init
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Install cloud-init (RHEL/CentOS)
+      yum:
+        name: cloud-init
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    # Task 4: Clear machine-id
+    - name: Clear machine-id
+      copy:
+        dest: /etc/machine-id
+        content: ""
+        mode: 0644
+
+    # Task 5: Ensure machine-id symbolic link exists
+    - name: Check if machine-id symlink exists
+      stat:
+        path: /var/lib/dbus/machine-id
+      register: machine_id_link
+
+    - name: Create machine-id symlink if needed
+      file:
+        src: /etc/machine-id
+        dest: /var/lib/dbus/machine-id
+        state: link
+      when: not machine_id_link.stat.exists
+
+    # Task 6 & 7: Remove SSH host keys and create regeneration service
+    - name: Remove existing SSH host keys
+      file:
+        path: "/etc/ssh/ssh_host_{{ item }}_key"
+        state: absent
+      with_items:
+        - rsa
+        - dsa
+        - ecdsa
+        - ed25519
+
+    - name: Create SSH host key regeneration service
+      copy:
+        dest: /etc/systemd/system/regenerate_ssh_host_keys.service
+        content: |
+          [Unit]
+          Description=Regenerate SSH host keys
+          Before=ssh.service
+          ConditionFileIsExecutable=/usr/bin/ssh-keygen
+
+          [Service]
+          Type=oneshot
+          ExecStartPre=-/bin/dd if=/dev/hwrng of=/dev/urandom count=1 bs=4096
+          ExecStartPre=-/bin/sh -c "/bin/rm -f -v /etc/ssh/ssh_host_*_key*"
+          ExecStart=/usr/bin/ssh-keygen -A -v
+          ExecStartPost=/bin/systemctl disable regenerate_ssh_host_keys
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: 0644
+
+    - name: Enable SSH host key regeneration service
+      systemd:
+        name: regenerate_ssh_host_keys
+        enabled: yes
+        daemon_reload: yes
+
+    # Task 8: Clean package cache and remove stale packages
+    - name: Clean package cache (Ubuntu/Debian)
+      apt:
+        autoclean: yes
+        autoremove: yes
+      when: ansible_os_family == 'Debian'
+
+    - name: Clean package cache (RHEL/CentOS)
+      shell: yum clean all
+      when: ansible_os_family == 'RedHat'
+
+    # Task 9: Clear shell history
+    - name: Clear shell history
+      shell: history -c
+      args:
+        executable: /bin/bash
